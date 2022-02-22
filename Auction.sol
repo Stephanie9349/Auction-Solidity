@@ -4,30 +4,16 @@ import "./ERC20Contract.sol";
 import "./ERC721Contract.sol";
 
 contract Auction {
-    ERC20Contract private _erc20;
-    ERC721Contract private _erc721;
-
-    constructor(address erc20, address erc721) {
-        _erc20 = ERC20Contract(erc20);
-        _erc721 = ERC721Contract(erc721);
-    }
-
-    struct Product {
-        uint256 tokenId;
-        uint256 estimatedValue;
-    }
-
-    Product[] public products;
-
-    uint256 internal numberOfNFT;
     uint256 internal nonce;
-    uint256 internal numberOfProduct;
+    uint256 internal numberOfProduct = 0;
 
+    mapping(uint256 => bool) private _containedTokenList;
     mapping(uint256 => uint256) private _estimatedValue; // 감정가
-    mapping(uint256 => uint256) private _productPrice; // 최종 낙찰 가격
     mapping(uint256 => uint256) private _bestOffer; // 최고 제시액
     mapping(uint256 => uint256) private _timeLimit;
-    mapping(uint256 => address) private _recentBuyer;
+    mapping(uint256 => address) private _recentBidder;
+    mapping(uint256 => ERC721Contract) private _sellerContract;
+    mapping(uint256 => ERC20Contract) private _buyerContract;
 
     function _setEstimatedValue(address senderAddress) private returns (uint256) {
         uint256 random = uint256(keccak256(abi.encodePacked(block.timestamp, senderAddress, nonce))) % 100 + 1; // 1 to 100
@@ -35,19 +21,25 @@ contract Auction {
         return random;
     }
 
-    function registerNFT(uint256 tokenId) public {
-        require(_erc721.ownerOf(tokenId) == msg.sender && 
-                _erc721.getApproved(tokenId) == address(this),
-                "[Auction] alert >> Authentication error"   
+    function _checkNewTokenId(uint256 tokenId) private view returns (bool) {
+        return _containedTokenList[tokenId];
+    }
+
+    function registerNFT(uint256 tokenId, address sellerContractAddress) public {
+        require(!(_checkNewTokenId(tokenId)), "This token ID is already used");
+        require(ERC721Contract(sellerContractAddress).ownerOf(tokenId) == msg.sender &&
+                ERC721Contract(sellerContractAddress).getApproved(tokenId) == address(this),
+                "[Auction] alert >> Authentication error"
         );
 
         uint256 estimatedValue = _setEstimatedValue(msg.sender);
         _estimatedValue[tokenId] = estimatedValue;
 
-        products.push(Product(tokenId, _estimatedValue[tokenId]));
-
         numberOfProduct++;
-        _timeLimit[tokenId] = block.timestamp + 10 seconds;
+        _containedTokenList[tokenId] = true;
+        _sellerContract[tokenId] = ERC721Contract(sellerContractAddress);
+        _bestOffer[tokenId] = 0;
+        _timeLimit[tokenId] = block.timestamp + 60 seconds;
     }
 
     function getEstimatedValue(uint256 tokenId) public view returns (uint256) {
@@ -58,39 +50,38 @@ contract Auction {
         return _bestOffer[tokenId];
     }
 
-    function getAllProductInformation() public view returns (string memory) {
-        string memory listOfProducts;
-        for(uint i = 0; i <= numberOfProduct; i++) {
-            listOfProducts = string(abi.encodePacked(products[i].tokenId, products[i].estimatedValue, "\n"));
-        }
-        return listOfProducts;
+    function getNumberOfProduct() public view returns (uint256) {
+        return numberOfProduct;
     }
 
-    function _auctionSuccess(uint256 tokenId) private {
-        address _seller = _erc721.ownerOf(tokenId);
-        _erc721.transferFrom(_seller, _recentBuyer[tokenId], tokenId);
+    function getTimeLeft(uint256 tokenId) public view returns (int256) {
+        int256 _timeLeft = int256(_timeLimit[tokenId]) - int256(block.timestamp);
+        if(_timeLeft > 0) {
+            return _timeLeft;
+        } else {
+            return 0;
+        }
     }
 
-    function bidding(uint256 tokenId, uint256 price) public {
-        if(_timeLimit[tokenId] <= block.timestamp) {
-            _auctionSuccess(tokenId);
+    function bidding(uint256 tokenId, uint256 price, address buyerContractAddress) public {
+        if( (getTimeLeft(tokenId) == 0) && (_bestOffer[tokenId] != 0) ) {       
+            _transaction(tokenId, _recentBidder[tokenId]);
+            require(false, "!This product has been sold!");
         }
-        require(_timeLimit[tokenId] <= block.timestamp, "There is no time left for bidding.");
-        require(price > _bestOffer[tokenId], "You should offer higher price.");
-        address _seller = _erc721.ownerOf(tokenId);
-        _erc20.transferFrom(msg.sender, _seller, price);
-        if(_bestOffer[tokenId] > 0) {
-            _returnMoney(tokenId);
-        }
-        _recentBuyer[tokenId] = msg.sender;
+
+        require(getTimeLeft(tokenId) > 0, "There is no time left for bidding.");
+        require(price > _bestOffer[tokenId] && price > _estimatedValue[tokenId], "You should offer higher price.");
+
+        _recentBidder[tokenId] = msg.sender;
+        _buyerContract[tokenId] = ERC20Contract(buyerContractAddress);
         _bestOffer[tokenId] = price;
-        _timeLimit[tokenId] = block.timestamp + 5 seconds;
+        _timeLimit[tokenId] += 5 seconds;
     }
 
-    function _returnMoney(uint256 tokenId) private {
-        address _seller = _erc721.ownerOf(tokenId);
-        _erc20.transferFrom(_seller, _recentBuyer[tokenId], _bestOffer[tokenId]);
+    function _transaction(uint256 tokenId, address _buyerAddress) private {
+        address _seller = _sellerContract[tokenId].ownerOf(tokenId);
+        _buyerContract[tokenId].transferFrom(_buyerAddress, _seller, _bestOffer[tokenId]);
+        _sellerContract[tokenId].transferFrom(_seller, _buyerAddress, tokenId);
+        numberOfProduct--;
     }
-
-
 }
